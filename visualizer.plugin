@@ -1,0 +1,9 @@
+[Plugin]
+Loader=python3
+Module=visualizer
+IAge=2
+Name=Visualizer
+Description=Real-time audio visualizations for Rhythmbox
+Authors=Rhythmbox Visualizer contributors
+Copyright=Copyright © 2026 Rhythmbox Visualizer contributors (GPL-3.0-or-later)
+Website=https://gitlab.gnome.org/GNOME/rhythmbox
