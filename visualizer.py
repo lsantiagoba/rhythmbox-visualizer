@@ -39,6 +39,7 @@ MODES = (
     "Classic GOOM",
     "Classic GOOM 2K1",
 )
+CURSOR_HIDE_DELAY_SECONDS = 5
 
 
 class VisualizerWindow(Gtk.ApplicationWindow):
@@ -58,6 +59,9 @@ class VisualizerWindow(Gtk.ApplicationWindow):
         self.rain = [random.random() for _ in range(40)]
         self.classic_frames = {}
         self.mode_changed_callback = mode_changed_callback
+        self.inhibit_cookie = 0
+        self.cursor_timeout_id = 0
+        self.blank_cursor = None
 
         header = Gtk.HeaderBar(title="Visualizer", show_close_button=True)
         modes = Gtk.ComboBoxText()
@@ -84,8 +88,64 @@ class VisualizerWindow(Gtk.ApplicationWindow):
         self.canvas = Gtk.DrawingArea()
         self.canvas.connect("draw", self._draw)
         self.add(self.canvas)
+        self.add_events(Gdk.EventMask.POINTER_MOTION_MASK)
         self.connect("key-press-event", self._key_pressed)
+        self.connect("map-event", self._window_shown)
+        self.connect("unmap-event", self._window_hidden)
+        self.connect("motion-notify-event", self._mouse_moved)
         GLib.timeout_add(16, self._animate)
+
+    def _window_shown(self, _widget, _event):
+        if not self.inhibit_cookie:
+            application = self.get_application()
+            self.inhibit_cookie = application.inhibit(
+                self,
+                Gtk.ApplicationInhibitFlags.IDLE,
+                "Audio visualizer is open",
+            )
+        self._show_cursor()
+        self._restart_cursor_timeout()
+        return False
+
+    def _window_hidden(self, _widget, _event):
+        if self.inhibit_cookie:
+            self.get_application().uninhibit(self.inhibit_cookie)
+            self.inhibit_cookie = 0
+        self._cancel_cursor_timeout()
+        self._show_cursor()
+        return False
+
+    def _mouse_moved(self, _widget, _event):
+        self._show_cursor()
+        self._restart_cursor_timeout()
+        return False
+
+    def _restart_cursor_timeout(self):
+        self._cancel_cursor_timeout()
+        self.cursor_timeout_id = GLib.timeout_add_seconds(
+            CURSOR_HIDE_DELAY_SECONDS, self._hide_cursor
+        )
+
+    def _cancel_cursor_timeout(self):
+        if self.cursor_timeout_id:
+            GLib.source_remove(self.cursor_timeout_id)
+            self.cursor_timeout_id = 0
+
+    def _hide_cursor(self):
+        self.cursor_timeout_id = 0
+        window = self.get_window()
+        if window is not None and self.get_visible():
+            if self.blank_cursor is None:
+                self.blank_cursor = Gdk.Cursor.new_for_display(
+                    window.get_display(), Gdk.CursorType.BLANK_CURSOR
+                )
+            window.set_cursor(self.blank_cursor)
+        return False
+
+    def _show_cursor(self):
+        window = self.get_window()
+        if window is not None:
+            window.set_cursor(None)
 
     def set_spectrum(self, magnitudes):
         data = list(magnitudes or ())
