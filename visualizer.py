@@ -5,6 +5,7 @@
 import math
 import random
 import time
+from collections import deque
 
 import gi
 
@@ -392,9 +393,12 @@ class VisualizerPlugin(GObject.Object, Peas.Activatable):
         super().__init__()
         self.window = None
         self.player = None
-        self.spectra = []
-        self.classic_sinks = []
-        self.classic_valves = {}
+        # PyGObject's conversion of the get-stream-filters return value does
+        # not keep a reliable Python-side reference to a Gst.Bin.  Keep the
+        # current and a few recently prepared streams alive for Rhythmbox's
+        # overlap/crossfade window.  A bounded deque avoids the old unbounded
+        # per-track leak.
+        self.stream_filters = deque(maxlen=4)
         self.classic_frame_pending = {
             "Classic GOOM": False,
             "Classic GOOM 2K1": False,
@@ -408,7 +412,7 @@ class VisualizerPlugin(GObject.Object, Peas.Activatable):
     def do_activate(self):
         shell = self.object
         app = shell.props.application
-        self.window = VisualizerWindow(app, self._classic_mode_changed)
+        self.window = VisualizerWindow(app)
         self.window.connect("delete-event", self._hide_window)
 
         self.action = Gio.SimpleAction.new("show-visualizer", None)
@@ -441,9 +445,7 @@ class VisualizerPlugin(GObject.Object, Peas.Activatable):
         if self.window is not None:
             self.window.destroy()
         self.bus_connections.clear()
-        self.spectra.clear()
-        self.classic_sinks.clear()
-        self.classic_valves.clear()
+        self.stream_filters.clear()
         self.window = self.player = self.filter = self.action = None
 
     def _new_spectrum(self):
@@ -483,7 +485,6 @@ class VisualizerPlugin(GObject.Object, Peas.Activatable):
         capsfilter.get_static_pad("src").add_probe(
             Gst.PadProbeType.BUFFER, self._audio_buffer
         )
-        self.spectra.append(spectrum)
         return analyzer_bin
 
     def _add_classic_branch(self, analyzer_bin, tee, element_name, mode):
@@ -504,7 +505,15 @@ class VisualizerPlugin(GObject.Object, Peas.Activatable):
         queue.set_property("max-size-buffers", 3)
         queue.set_property("max-size-bytes", 0)
         queue.set_property("max-size-time", 0)
-        valve.set_property("drop", self.window is None or self.window.mode != mode)
+        # A GstValve with drop=True also discards EOS.  Rhythmbox's multi-stream
+        # backend then waits forever for the old stream to finish and exhausts
+        # its two playback slots after two songs.  Drop only audio buffers in a
+        # pad probe so CAPS, SEGMENT, EOS, and other stream events still reach
+        # the inactive visualizer sink.
+        valve.set_property("drop", False)
+        valve.get_static_pad("sink").add_probe(
+            Gst.PadProbeType.BUFFER, self._classic_buffer, mode
+        )
         audio_caps.set_property(
             "caps", Gst.Caps.from_string("audio/x-raw,format=S16LE,channels=2")
         )
@@ -528,12 +537,10 @@ class VisualizerPlugin(GObject.Object, Peas.Activatable):
         for left, right in zip(elements, elements[1:]):
             if not left.link(right):
                 raise RuntimeError("Could not link the classic %s visualizer" % element_name)
-        self.classic_sinks.append(sink)
-        self.classic_valves[mode] = valve
-
-    def _classic_mode_changed(self, active_mode):
-        for mode, valve in self.classic_valves.items():
-            valve.set_property("drop", mode != active_mode)
+    def _classic_buffer(self, _pad, _probe_info, mode):
+        if self.window is None or self.window.mode != mode:
+            return Gst.PadProbeReturn.DROP
+        return Gst.PadProbeReturn.OK
 
     def _classic_sample(self, sink, mode):
         sample = sink.emit("pull-sample")
@@ -572,7 +579,18 @@ class VisualizerPlugin(GObject.Object, Peas.Activatable):
         return False
 
     def _create_stream_filters(self, _player, _uri):
-        return [self._new_spectrum()]
+        # rb-player-gst-multi does not tolerate an exception escaping this
+        # signal handler: PyGObject converts the failed return value to NULL
+        # and Rhythmbox subsequently aborts while trying to add it to a bin.
+        # Playback must remain usable even when an optional visualizer element
+        # cannot be constructed for a particular stream.
+        try:
+            analyzer = self._new_spectrum()
+        except Exception as error:
+            GLib.warning("Visualizer filter disabled for %s: %s" % (_uri, error))
+            return []
+        self.stream_filters.append(analyzer)
+        return [analyzer]
 
     def _audio_buffer(self, pad, probe_info):
         """Calculate selected DFT bins without relying on pipeline bus messages."""
