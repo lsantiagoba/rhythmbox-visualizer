@@ -15,8 +15,8 @@ player.
 
 ## Highlights
 
-- Eleven audio-reactive visualization modes.
-- Original **GOOM** and **GOOM 2K1** engines rendered at 1280×720.
+- Native modes plus every classic GStreamer visualizer installed on the system.
+- Classic engines rendered at 1280×720, including **GOOM**, **GOOM 2K1**, and **Monoscope**.
 - 64 logarithmically spaced frequency bands.
 - Smooth animation, peak tracking, particles, and radial effects.
 - Adjustable sensitivity.
@@ -63,10 +63,12 @@ player.
 | **Digital Rain** | Frequency-driven columns inspired by digital rain. |
 | **Classic GOOM** | The original psychedelic GStreamer GOOM visualizer. |
 | **Classic GOOM 2K1** | The alternate classic GOOM 2K1 visualizer. |
+| **Classic Monoscope** | The stabilized waveform visualizer from classic Rhythmbox releases. |
 
-The classic engines render at **1280×720** and target **30 FPS**. Only the
-selected GOOM engine is active, reducing CPU usage when switching between the
-classic modes or returning to a native animation.
+The plugin reproduces Rhythmbox 2.95's discovery behavior: every installed
+GStreamer element classified as `Visualization` is added to the mode selector.
+Classic engines render at **1280×720** and target **30 FPS**. Only the selected
+engine is active, reducing CPU usage when switching modes.
 
 ## Requirements
 
@@ -136,7 +138,7 @@ audio pipeline. Audio samples are converted to a known floating-point format
 and observed directly through a pad probe.
 
 The native modes use a lightweight frequency analysis and a Cairo renderer.
-The classic modes branch the same audio stream into the installed GOOM engines,
+The classic modes branch the same audio stream into the installed GStreamer engines,
 convert their video output into GTK-compatible pixel buffers, and display only
 the latest available frame. Frame delivery is bounded so the GTK event loop
 cannot be overwhelmed by stale video frames.
@@ -146,9 +148,7 @@ Rhythmbox audio
       │
       ├── Frequency analyzer ── Native Cairo visualizations
       │
-      ├── GOOM ──────────────── Classic GOOM frames
-      │
-      └── GOOM 2K1 ─────────── Classic GOOM 2K1 frames
+      └── Installed Visualization elements ─── Classic frames
 ```
 
 Only one classic video branch is enabled at a time. The normal Rhythmbox audio
@@ -180,13 +180,14 @@ sudo apt install python3-gi-cairo
 Start a new track after enabling the plugin. Some Rhythmbox backends create
 their per-stream filters only when playback begins.
 
-### Classic GOOM is unavailable
+### Classic visualizers are unavailable
 
-Check that both engines are installed:
+Inspect the classic engines installed on the system:
 
 ```bash
 gst-inspect-1.0 goom
 gst-inspect-1.0 goom2k1
+gst-inspect-1.0 monoscope
 ```
 
 On Ubuntu and Debian they are normally provided by

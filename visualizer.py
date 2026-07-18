@@ -27,7 +27,7 @@ from gi.repository import Gdk, GdkPixbuf, Gio, GLib, GObject, Gst, GstApp, Gtk, 
 
 BANDS = 64
 MIN_DB = -80.0
-MODES = (
+NATIVE_MODES = (
     "Bars",
     "Mirror Spectrum",
     "Wave",
@@ -37,8 +37,6 @@ MODES = (
     "Particles",
     "Frequency Mountains",
     "Digital Rain",
-    "Classic GOOM",
-    "Classic GOOM 2K1",
 )
 CURSOR_HIDE_DELAY_SECONDS = 5
 
@@ -46,31 +44,32 @@ CURSOR_HIDE_DELAY_SECONDS = 5
 class VisualizerWindow(Gtk.ApplicationWindow):
     """A lightweight Cairo renderer driven by GStreamer's spectrum messages."""
 
-    def __init__(self, application, mode_changed_callback=None):
+    def __init__(self, application, modes, classic_modes):
         super().__init__(application=application, title="Rhythmbox Visualizer")
         self.set_default_size(900, 520)
         self.set_icon_name("rhythmbox")
         self.values = [0.0] * BANDS
         self.peaks = [0.0] * BANDS
         self.target = [0.0] * BANDS
-        self.mode = MODES[0]
+        self.modes = modes
+        self.classic_modes = classic_modes
+        self.mode = modes[0]
         self.sensitivity = 1.0
         self.phase = 0.0
         self.particles = []
         self.rain = [random.random() for _ in range(40)]
         self.classic_frames = {}
-        self.mode_changed_callback = mode_changed_callback
         self.inhibit_cookie = 0
         self.cursor_timeout_id = 0
         self.blank_cursor = None
 
         header = Gtk.HeaderBar(title="Visualizer", show_close_button=True)
-        modes = Gtk.ComboBoxText()
-        for name in MODES:
-            modes.append_text(name)
-        modes.set_active(0)
-        modes.connect("changed", self._mode_changed)
-        header.pack_start(modes)
+        mode_selector = Gtk.ComboBoxText()
+        for name in modes:
+            mode_selector.append_text(name)
+        mode_selector.set_active(0)
+        mode_selector.connect("changed", self._mode_changed)
+        header.pack_start(mode_selector)
 
         adjustment = Gtk.Adjustment(1.0, 0.4, 2.5, 0.1, 0.2, 0)
         sensitivity = Gtk.Scale(orientation=Gtk.Orientation.HORIZONTAL, adjustment=adjustment)
@@ -178,7 +177,7 @@ class VisualizerWindow(Gtk.ApplicationWindow):
         height = widget.get_allocated_height()
         cr.set_source_rgb(0.025, 0.035, 0.075)
         cr.paint()
-        if self.mode in ("Classic GOOM", "Classic GOOM 2K1"):
+        if self.mode in self.classic_modes:
             frame = self.classic_frames.get(self.mode)
             if frame is not None:
                 self._draw_classic_frame(cr, width, height, frame)
@@ -360,9 +359,7 @@ class VisualizerWindow(Gtk.ApplicationWindow):
             cr.fill()
 
     def _mode_changed(self, combo):
-        self.mode = combo.get_active_text() or MODES[0]
-        if self.mode_changed_callback is not None:
-            self.mode_changed_callback(self.mode)
+        self.mode = combo.get_active_text() or self.modes[0]
 
     def _sensitivity_changed(self, scale):
         self.sensitivity = scale.get_value()
@@ -399,10 +396,8 @@ class VisualizerPlugin(GObject.Object, Peas.Activatable):
         # overlap/crossfade window.  A bounded deque avoids the old unbounded
         # per-track leak.
         self.stream_filters = deque(maxlen=4)
-        self.classic_frame_pending = {
-            "Classic GOOM": False,
-            "Classic GOOM 2K1": False,
-        }
+        self.classic_visualizers = {}
+        self.classic_frame_pending = {}
         self.filter = None
         self.stream_filter_id = None
         self.bus_connections = []
@@ -412,7 +407,13 @@ class VisualizerPlugin(GObject.Object, Peas.Activatable):
     def do_activate(self):
         shell = self.object
         app = shell.props.application
-        self.window = VisualizerWindow(app)
+        Gst.init(None)
+        self.classic_visualizers = self._discover_classic_visualizers()
+        self.classic_frame_pending = {
+            mode: False for mode in self.classic_visualizers
+        }
+        modes = NATIVE_MODES + tuple(self.classic_visualizers)
+        self.window = VisualizerWindow(app, modes, frozenset(self.classic_visualizers))
         self.window.connect("delete-event", self._hide_window)
 
         self.action = Gio.SimpleAction.new("show-visualizer", None)
@@ -424,7 +425,6 @@ class VisualizerPlugin(GObject.Object, Peas.Activatable):
             Gio.MenuItem.new(label="Visualizer", detailed_action="app.show-visualizer"),
         )
 
-        Gst.init(None)
         self.player = shell.props.shell_player.props.player
         if GObject.signal_lookup("get-stream-filters", self.player):
             self.stream_filter_id = self.player.connect(
@@ -447,6 +447,28 @@ class VisualizerPlugin(GObject.Object, Peas.Activatable):
         self.bus_connections.clear()
         self.stream_filters.clear()
         self.window = self.player = self.filter = self.action = None
+
+    @staticmethod
+    def _discover_classic_visualizers():
+        """Return every GStreamer visualizer, as Rhythmbox 2.95 did."""
+        preferred_labels = {
+            "goom": "Classic GOOM",
+            "goom2k1": "Classic GOOM 2K1",
+            "monoscope": "Classic Monoscope",
+        }
+        factories = []
+        for factory in Gst.Registry.get().get_feature_list(Gst.ElementFactory):
+            klass = factory.get_metadata(Gst.ELEMENT_METADATA_KLASS) or ""
+            if "Visualization" not in klass:
+                continue
+            element_name = factory.get_name()
+            long_name = factory.get_metadata(Gst.ELEMENT_METADATA_LONGNAME)
+            label = preferred_labels.get(element_name, "Classic %s" % long_name)
+            priority = (0 if element_name == "goom" else
+                        1 if element_name == "goom2k1" else 2)
+            factories.append((priority, label.casefold(), label, element_name))
+        factories.sort()
+        return {label: element_name for _priority, _key, label, element_name in factories}
 
     def _new_spectrum(self):
         analyzer_bin = Gst.Bin.new(None)
@@ -476,8 +498,7 @@ class VisualizerPlugin(GObject.Object, Peas.Activatable):
                 not tee.link(passthrough_queue) or not passthrough_queue.link(spectrum)):
             raise RuntimeError("Could not link the audio analyzer")
 
-        for element_name, mode in (("goom", "Classic GOOM"),
-                                   ("goom2k1", "Classic GOOM 2K1")):
+        for mode, element_name in self.classic_visualizers.items():
             self._add_classic_branch(analyzer_bin, tee, element_name, mode)
 
         analyzer_bin.add_pad(Gst.GhostPad.new("sink", convert.get_static_pad("sink")))
@@ -515,7 +536,7 @@ class VisualizerPlugin(GObject.Object, Peas.Activatable):
             Gst.PadProbeType.BUFFER, self._classic_buffer, mode
         )
         audio_caps.set_property(
-            "caps", Gst.Caps.from_string("audio/x-raw,format=S16LE,channels=2")
+            "caps", Gst.Caps.from_string("audio/x-raw,format=S16LE")
         )
         video_caps.set_property(
             "caps", Gst.Caps.from_string(
